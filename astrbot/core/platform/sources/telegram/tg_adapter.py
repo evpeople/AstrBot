@@ -163,7 +163,7 @@ class TelegramPlatformAdapter(Platform):
             logger.error(f"向 Telegram 注册指令时发生错误: {e!s}")
 
     def collect_commands(self) -> list[BotCommand]:
-        """从注册的处理器中收集所有指令"""
+        """从注册的处理器中收集所有指令（包括别名）"""
         command_dict = {}
         skip_commands = {"start"}
 
@@ -174,14 +174,14 @@ class TelegramPlatformAdapter(Platform):
             if not handler_metadata.enabled:
                 continue
             for event_filter in handler_metadata.event_filters:
-                cmd_info = self._extract_command_info(
+                cmd_info_list = self._extract_command_info(
                     event_filter,
                     handler_metadata,
                     skip_commands,
                 )
-                if cmd_info:
-                    cmd_name, description = cmd_info
-                    command_dict.setdefault(cmd_name, description)
+                if cmd_info_list:
+                    for cmd_name, description in cmd_info_list:
+                        command_dict.setdefault(cmd_name, description)
 
         commands_a = sorted(command_dict.keys())
         return [BotCommand(cmd, command_dict[cmd]) for cmd in commands_a]
@@ -191,8 +191,8 @@ class TelegramPlatformAdapter(Platform):
         event_filter,
         handler_metadata,
         skip_commands: set,
-    ) -> tuple[str, str] | None:
-        """从事件过滤器中提取指令信息"""
+    ) -> list[tuple[str, str]] | None:
+        """从事件过滤器中提取指令信息（包含主命令和别名）"""
         cmd_name = None
         is_group = False
         if isinstance(event_filter, CommandFilter) and event_filter.command_name:
@@ -202,25 +202,47 @@ class TelegramPlatformAdapter(Platform):
             ):
                 return None
             cmd_name = event_filter.command_name
+            # 获取别名
+            aliases = event_filter.alias or set()
         elif isinstance(event_filter, CommandGroupFilter):
             if event_filter.parent_group:
                 return None
             cmd_name = event_filter.group_name
             is_group = True
+            aliases = event_filter.alias or set()
+        else:
+            return None
 
         if not cmd_name or cmd_name in skip_commands:
             return None
 
-        if not re.match(r"^[a-z0-9_]+$", cmd_name) or len(cmd_name) > 32:
-            return None
-
-        # Build description.
+        # 构建描述
         description = handler_metadata.desc or (
             f"指令组: {cmd_name} (包含多个子指令)" if is_group else f"指令: {cmd_name}"
         )
         if len(description) > 30:
             description = description[:30] + "..."
-        return cmd_name, description
+
+        result = []
+
+        # 检查主命令是否符合格式
+        if re.match(r"^[a-z0-9_]+$", cmd_name) and len(cmd_name) <= 32:
+            result.append((cmd_name, description))
+
+        # 检查别名并添加
+        for alias in aliases:
+            if (
+                re.match(r"^[a-z0-9_]+$", alias)
+                and len(alias) <= 32
+                and alias not in skip_commands
+            ):
+                # 别名使用相同的描述，或者可以加个标记
+                alias_desc = f"别名: {alias}"
+                if len(alias_desc) > 30:
+                    alias_desc = alias_desc[:30] + "..."
+                result.append((alias, alias_desc))
+
+        return result if result else None
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_chat:
